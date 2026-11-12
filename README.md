@@ -94,13 +94,10 @@ flowchart TD
 flowchart LR
     DEV[Developer] -->|Git push to main| GH[GitHub Repository]
     GH -->|Trigger| GA[GitHub Actions]
-    GA --> CI[CI: Syntax & Unit Checks]
-    CI --> BUILD[CD: Docker Build]
-    BUILD -->|Push versioned image| ECR[Amazon ECR]
-    ECR -->|Pull image| EC2[Amazon EC2 Instance]
-    GA -->|Deployment job| RUNNER[Self-hosted Runner on EC2]
-    RUNNER -->|Stop old / run new container| EC2
-    EC2 --> DOCKER[Docker Container: FastAPI + UI]
+    GA --> CI[CI: Syntax & Dependencies Check]
+    CI --> RUNNER[Self-hosted EC2 Runner]
+    RUNNER -->|Direct Docker build| DOCKER[Docker Container: FastAPI + UI]
+    RUNNER -->|Stop old / start new| DOCKER
     DOCKER --> SERVICES[Bedrock · S3 · Pinecone · PostgreSQL · LangSmith]
 ```
 

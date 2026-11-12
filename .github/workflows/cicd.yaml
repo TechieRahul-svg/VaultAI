@@ -47,115 +47,30 @@ jobs:
           python -m compileall -q app worker scripts
 
   # ==========================================
-  # 2. CONTINUOUS DELIVERY - BUILD AND PUSH ECR
-  # ==========================================
-
-  build-and-push-ecr-image:
-    name: Continuous Delivery
-    needs: integration
-    runs-on: ubuntu-latest
-    environment: production
-
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Build and Push Docker Image
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY_NAME }}
-          IMAGE_TAG: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-
-          test -n "$ECR_REGISTRY"
-          test -n "$ECR_REPOSITORY"
-
-          IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-
-          echo "Building Docker image: $IMAGE..."
-          docker build -t "$IMAGE" .
-
-          echo "Pushing image to Amazon ECR..."
-          docker push "$IMAGE"
-
-          echo "Docker image pushed successfully"
-
-  # ==========================================
-  # 3. CONTINUOUS DEPLOYMENT - EC2
+  # 2. CONTINUOUS DEPLOYMENT (ON EC2 RUNNER)
+  # Bypasses AWS ECR to prevent SCP restrictions
   # ==========================================
 
   continuous-deployment:
-    name: Continuous Deployment
-    needs: build-and-push-ecr-image
-
+    name: Build & Deploy on EC2
+    needs: integration
     runs-on: [self-hosted, linux, x64, atlas-ec2]
     environment: production
 
     steps:
+      - name: Checkout Code on Runner
+        uses: actions/checkout@v4
 
-      # ----------------------------------------
-      # AWS AUTHENTICATION
-      # ----------------------------------------
+      - name: Stop Old Container
+        run: |
+          docker rm -f vault-ai atlas-enterprise-ai || true
 
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Login to Amazon ECR
-        uses: aws-actions/amazon-ecr-login@v2
-
-      # ----------------------------------------
-      # CONSTRUCT DOCKER IMAGE URI
-      # ----------------------------------------
-
-      - name: Construct ECR Image URI
-        id: image
-        env:
-          AWS_REGION: ${{ secrets.AWS_REGION }}
-          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY_NAME }}
-          IMAGE_TAG: ${{ github.sha }}
+      - name: Build Local Docker Image
         run: |
           set -euo pipefail
-
-          ACCOUNT_ID=$(aws sts get-caller-identity \
-            --query Account \
-            --output text)
-
-          REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-          IMAGE="${REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
-
-          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
-          echo "ECR image URI constructed successfully: $IMAGE"
-
-      # ----------------------------------------
-      # PULL IMAGE
-      # ----------------------------------------
-
-      - name: Pull Docker Image
-        env:
-          IMAGE: ${{ steps.image.outputs.image }}
-        run: |
-          set -euo pipefail
-          docker pull "$IMAGE"
-
-      # ----------------------------------------
-      # VALIDATE APPLICATION SECRETS
-      # ----------------------------------------
+          echo "Building Docker image on EC2 runner..."
+          docker build -t vault-ai:${{ github.sha }} -t vault-ai:latest .
+          echo "Docker image built successfully"
 
       - name: Validate Application Secrets
         env:
@@ -192,22 +107,8 @@ jobs:
 
           echo "All required application secrets verified"
 
-      # ----------------------------------------
-      # STOP EXISTING CONTAINER
-      # ----------------------------------------
-
-      - name: Stop Old Container
-        run: |
-          docker rm -f vault-ai atlas-enterprise-ai || true
-
-      # ----------------------------------------
-      # START NEW CONTAINER WITH GITHUB SECRETS
-      # ----------------------------------------
-
-      - name: Start New Container
+      - name: Start Container
         env:
-          IMAGE: ${{ steps.image.outputs.image }}
-
           # AWS Configuration
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -267,11 +168,7 @@ jobs:
             -e HITL_ENABLED \
             -e MEMORY_TURNS \
             -p 8000:8000 \
-            "$IMAGE"
-
-      # ----------------------------------------
-      # VERIFY DEPLOYMENT
-      # ----------------------------------------
+            vault-ai:latest
 
       - name: Verify Deployment
         run: |
@@ -300,10 +197,6 @@ jobs:
             > /dev/null
 
           echo "Vault AI deployed and verified successfully"
-
-      # ----------------------------------------
-      # CLEANUP
-      # ----------------------------------------
 
       - name: Clean Unused Docker Images
         run: |

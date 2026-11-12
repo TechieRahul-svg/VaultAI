@@ -55,7 +55,7 @@ jobs:
     name: Build & Deploy on EC2
     needs: integration
     runs-on: [self-hosted, linux, x64]
-
+    environment: production
     steps:
       - name: Checkout Code on Runner
         uses: actions/checkout@v4

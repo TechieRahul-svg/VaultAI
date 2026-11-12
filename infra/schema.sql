@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS chat_messages (
  conversation_id uuid NOT NULL,
  role text NOT NULL CHECK(role IN ('user','assistant')),
  content text NOT NULL,
+ sources jsonb DEFAULT '[]'::jsonb,
  created_at timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS sources jsonb DEFAULT '[]'::jsonb;
 CREATE INDEX IF NOT EXISTS chat_messages_session_idx ON chat_messages(tenant_id,conversation_id,id DESC);

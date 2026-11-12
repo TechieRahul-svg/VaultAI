@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     embed_dim:int=1024
     max_upload_bytes:int=10485760
     pinecone_api_key:str=''
-    pinecone_index_name:str="vault-ai-18-bh0dufo.svc.aped-4627-b74a.pinecone.io"
+    pinecone_index_name:str="vault-ai-index"
     pinecone_cloud:str='aws'
     pinecone_region:str='us-east-1'
     pinecone_ready_timeout:int=180

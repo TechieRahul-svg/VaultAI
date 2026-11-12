@@ -1,0 +1,310 @@
+name: Vault AI CI/CD
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "README.md"
+      - "docs/**"
+      - ".gitignore"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vault-deployment
+  cancel-in-progress: false
+
+jobs:
+
+  # ==========================================
+  # 1. CONTINUOUS INTEGRATION
+  # ==========================================
+
+  integration:
+    name: Continuous Integration
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Check Python Syntax & Compilation
+        run: |
+          python -m compileall -q app worker scripts
+
+  # ==========================================
+  # 2. CONTINUOUS DELIVERY - BUILD AND PUSH ECR
+  # ==========================================
+
+  build-and-push-ecr-image:
+    name: Continuous Delivery
+    needs: integration
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and Push Docker Image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY_NAME }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          test -n "$ECR_REGISTRY"
+          test -n "$ECR_REPOSITORY"
+
+          IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+          echo "Building Docker image: $IMAGE..."
+          docker build -t "$IMAGE" .
+
+          echo "Pushing image to Amazon ECR..."
+          docker push "$IMAGE"
+
+          echo "Docker image pushed successfully"
+
+  # ==========================================
+  # 3. CONTINUOUS DEPLOYMENT - EC2
+  # ==========================================
+
+  continuous-deployment:
+    name: Continuous Deployment
+    needs: build-and-push-ecr-image
+
+    runs-on: [self-hosted, linux, x64, atlas-ec2]
+    environment: production
+
+    steps:
+
+      # ----------------------------------------
+      # AWS AUTHENTICATION
+      # ----------------------------------------
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ----------------------------------------
+      # CONSTRUCT DOCKER IMAGE URI
+      # ----------------------------------------
+
+      - name: Construct ECR Image URI
+        id: image
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY_NAME }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          ACCOUNT_ID=$(aws sts get-caller-identity \
+            --query Account \
+            --output text)
+
+          REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          IMAGE="${REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "ECR image URI constructed successfully: $IMAGE"
+
+      # ----------------------------------------
+      # PULL IMAGE
+      # ----------------------------------------
+
+      - name: Pull Docker Image
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+        run: |
+          set -euo pipefail
+          docker pull "$IMAGE"
+
+      # ----------------------------------------
+      # VALIDATE APPLICATION SECRETS
+      # ----------------------------------------
+
+      - name: Validate Application Secrets
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
+
+        run: |
+          set -euo pipefail
+
+          REQUIRED=(
+            AWS_ACCESS_KEY_ID
+            AWS_SECRET_ACCESS_KEY
+            AWS_REGION
+            S3_BUCKET
+            DATABASE_URL
+            PINECONE_API_KEY
+          )
+
+          for name in "${REQUIRED[@]}"; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Missing Required Secret: $name"
+              exit 1
+            fi
+          done
+
+          if [ -z "${LANGSMITH_API_KEY:-}" ]; then
+            echo "::notice::LANGSMITH_API_KEY not set; application will run without LangSmith telemetry"
+          fi
+
+          echo "All required application secrets verified"
+
+      # ----------------------------------------
+      # STOP EXISTING CONTAINER
+      # ----------------------------------------
+
+      - name: Stop Old Container
+        run: |
+          docker rm -f vault-ai atlas-enterprise-ai || true
+
+      # ----------------------------------------
+      # START NEW CONTAINER WITH GITHUB SECRETS
+      # ----------------------------------------
+
+      - name: Start New Container
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+
+          # AWS Configuration
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+
+          # Bedrock Model Configuration
+          BEDROCK_EMBED_MODEL: ${{ secrets.BEDROCK_EMBED_MODEL || 'amazon.titan-embed-text-v2:0' }}
+          BEDROCK_CHAT_MODEL: ${{ secrets.BEDROCK_CHAT_MODEL || 'amazon.nova-lite-v1:0' }}
+          EMBED_DIM: ${{ secrets.EMBED_DIM || '1024' }}
+
+          # Pinecone Configuration
+          PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
+          PINECONE_INDEX_NAME: ${{ secrets.PINECONE_INDEX_NAME || 'vault-ai-index' }}
+          PINECONE_CLOUD: ${{ secrets.PINECONE_CLOUD || 'aws' }}
+          PINECONE_REGION: ${{ secrets.PINECONE_REGION || 'us-east-1' }}
+          PINECONE_READY_TIMEOUT: ${{ secrets.PINECONE_READY_TIMEOUT || '180' }}
+
+          # PostgreSQL Database Configuration
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+          # LangSmith Observability Configuration
+          LANGSMITH_TRACING: ${{ secrets.LANGSMITH_TRACING || 'true' }}
+          LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY || '' }}
+          LANGSMITH_PROJECT: ${{ secrets.LANGSMITH_PROJECT || 'vault-ai' }}
+          LANGSMITH_ENDPOINT: ${{ secrets.LANGSMITH_ENDPOINT || 'https://api.smith.langchain.com' }}
+
+          # Application & Guardrail Settings
+          HITL_ENABLED: ${{ secrets.HITL_ENABLED || 'true' }}
+          MEMORY_TURNS: ${{ secrets.MEMORY_TURNS || '6' }}
+
+        run: |
+          set -euo pipefail
+
+          docker run -d \
+            --name vault-ai \
+            --restart unless-stopped \
+            -e AWS_ACCESS_KEY_ID \
+            -e AWS_SECRET_ACCESS_KEY \
+            -e AWS_REGION \
+            -e AWS_DEFAULT_REGION \
+            -e S3_BUCKET \
+            -e BEDROCK_EMBED_MODEL \
+            -e BEDROCK_CHAT_MODEL \
+            -e EMBED_DIM \
+            -e PINECONE_API_KEY \
+            -e PINECONE_INDEX_NAME \
+            -e PINECONE_CLOUD \
+            -e PINECONE_REGION \
+            -e PINECONE_READY_TIMEOUT \
+            -e DATABASE_URL \
+            -e LANGSMITH_TRACING \
+            -e LANGSMITH_API_KEY \
+            -e LANGSMITH_PROJECT \
+            -e LANGSMITH_ENDPOINT \
+            -e HITL_ENABLED \
+            -e MEMORY_TURNS \
+            -p 8000:8000 \
+            "$IMAGE"
+
+      # ----------------------------------------
+      # VERIFY DEPLOYMENT
+      # ----------------------------------------
+
+      - name: Verify Deployment
+        run: |
+          set -euo pipefail
+
+          sleep 10
+
+          if ! docker inspect -f '{{.State.Running}}' vault-ai | grep -qx true; then
+            echo "::error::Container is not running"
+            docker logs --tail 100 vault-ai
+            exit 1
+          fi
+
+          echo "Checking application health endpoint..."
+          curl --fail --silent --show-error \
+            --retry 5 \
+            --retry-delay 3 \
+            http://127.0.0.1:8000/health/live \
+            > /dev/null
+
+          echo "Checking application home UI..."
+          curl --fail --silent --show-error \
+            --retry 5 \
+            --retry-delay 3 \
+            http://127.0.0.1:8000/ \
+            > /dev/null
+
+          echo "Vault AI deployed and verified successfully"
+
+      # ----------------------------------------
+      # CLEANUP
+      # ----------------------------------------
+
+      - name: Clean Unused Docker Images
+        run: |
+          docker image prune -f

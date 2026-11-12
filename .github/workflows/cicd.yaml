@@ -54,23 +54,11 @@ jobs:
   continuous-deployment:
     name: Build & Deploy on EC2
     needs: integration
-    runs-on: [self-hosted, linux, x64, atlas-ec2]
-    environment: production
+    runs-on: [self-hosted, linux, x64]
 
     steps:
       - name: Checkout Code on Runner
         uses: actions/checkout@v4
-
-      - name: Stop Old Container
-        run: |
-          docker rm -f vault-ai atlas-enterprise-ai || true
-
-      - name: Build Local Docker Image
-        run: |
-          set -euo pipefail
-          echo "Building Docker image on EC2 runner..."
-          docker build -t vault-ai:${{ github.sha }} -t vault-ai:latest .
-          echo "Docker image built successfully"
 
       - name: Validate Application Secrets
         env:
@@ -81,7 +69,6 @@ jobs:
           PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
-
         run: |
           set -euo pipefail
 
@@ -106,6 +93,17 @@ jobs:
           fi
 
           echo "All required application secrets verified"
+
+      - name: Build Local Docker Image
+        run: |
+          set -euo pipefail
+          echo "Building Docker image on EC2 runner..."
+          docker build -t vault-ai:${{ github.sha }} -t vault-ai:latest .
+          echo "Docker image built successfully"
+
+      - name: Stop Old Container
+        run: |
+          docker rm -f vault-ai atlas-enterprise-ai || true
 
       - name: Start Container
         env:
@@ -140,7 +138,6 @@ jobs:
           # Application & Guardrail Settings
           HITL_ENABLED: ${{ secrets.HITL_ENABLED || 'true' }}
           MEMORY_TURNS: ${{ secrets.MEMORY_TURNS || '6' }}
-
         run: |
           set -euo pipefail
 

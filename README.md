@@ -11,7 +11,6 @@
 </div>
 
 ---
-
 ## Overview
 
 **Vault AI** is a full-stack, enterprise knowledge assistant that delivers grounded answers to natural-language questions over uploaded organizational documents using Retrieval-Augmented Generation (RAG). It combines a high-performance **FastAPI** backend, **LangGraph** workflow orchestration, **Amazon Bedrock** (Titan Embeddings V2 & Nova Lite), **Pinecone** vector database, **PostgreSQL** relational persistence, and **LangSmith** observability with a clean, responsive single-page web interface.

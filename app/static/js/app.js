@@ -1,11 +1,24 @@
 // Simple single-workspace UI. No login, tokens, or user accounts.
 const $ = id => document.getElementById(id);
+
+// Safe RFC4122 UUID generator that works on both HTTPS and plain HTTP over IP (EC2)
+function generateUUID() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random() * 16 | 0;
+    const v = c === 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
+}
+
 // Single-workspace conversation identifier, not an authentication token.
-let conversationId = sessionStorage.getItem('atlas_conversation_id') || crypto.randomUUID();
+let conversationId = sessionStorage.getItem('atlas_conversation_id') || generateUUID();
 sessionStorage.setItem('atlas_conversation_id', conversationId);
 
 function startNewChat() {
-  conversationId = crypto.randomUUID();
+  conversationId = generateUUID();
   sessionStorage.setItem('atlas_conversation_id', conversationId);
   $('messages').replaceChildren();
   const hero = document.querySelector('.hero');
@@ -103,7 +116,17 @@ async function loadRecentChats() {
 }
 
 const toast = msg => { const el = $('toast'); el.textContent = msg; el.style.display = 'block'; setTimeout(() => el.style.display = 'none', 4000) };
-const api = async (path, options = {}) => { const res = await fetch(path, { ...options, headers: { 'Content-Type': 'application/json', ...(options.headers || {}) } }); const data = await res.json(); if (!res.ok) throw Error(data.detail || 'Request failed'); return data };
+const api = async (path, options = {}) => {
+  const res = await fetch(path, { ...options, headers: { 'Content-Type': 'application/json', ...(options.headers || {}) } });
+  let data;
+  try {
+    data = await res.json();
+  } catch (_) {
+    throw Error(res.statusText || `Request failed with status ${res.status}`);
+  }
+  if (!res.ok) throw Error(data.detail || data.message || 'Request failed');
+  return data;
+};
 function view(name) { ['chat', 'docs', 'approval', 'admin'].forEach(x => { $(x + 'View').classList.toggle('hidden', x !== name); $(x + 'Tab').classList.toggle('active', x === name) }); $('heading').textContent = { chat: 'Ask your organization\'s knowledge', docs: 'Document management', approval: 'Approval requests', admin: 'Operational overview' }[name]; if (name === 'docs') loadDocs(); if (name === 'admin') loadMetrics(); if (name === 'approval') loadApprovals() }
 $('chatTab').onclick = () => view('chat'); $('docsTab').onclick = () => view('docs'); $('adminTab').onclick = () => view('admin'); $('approvalTab').onclick = () => view('approval'); $('refreshApprovals').onclick = loadApprovals;
 function addMessage(content, kind, sources = []) { const el = document.createElement('div'); el.className = 'message ' + kind; el.textContent = content; if (sources.length) { const wrap = document.createElement('div'); wrap.className = 'sources'; sources.forEach(s => { const d = document.createElement('details'); const title = document.createElement('summary'); title.textContent = `[${s.index}] ${s.title} — page ${s.page}`; const excerpt = document.createElement('p'); excerpt.textContent = s.excerpt; d.append(title, excerpt); wrap.append(d) }); el.append(wrap); const feedback = document.createElement('button'); feedback.textContent = '👍 Helpful'; feedback.onclick = async () => { try { await api('/api/feedback', { method: 'POST', body: JSON.stringify({ rating: 1 }) }); toast('Feedback saved') } catch (e) { toast(e.message) } }; el.append(feedback) } $('messages').append(el); $('messages').scrollTo({ top: $('messages').scrollHeight, behavior: 'smooth' }) }
